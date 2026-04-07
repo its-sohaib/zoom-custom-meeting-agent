@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 /**
- * OpenAI Realtime (WebSocket) → PCM16 → ffplay stdout.
+ * OpenAI Realtime (WebSocket) → PCM16 → ffmpeg → system audio.
  * Route meeting audio: set system output (or Multi-Output) to BlackHole 2ch, then in Zoom web
- * choose BlackHole as the microphone. Requires ffmpeg (ffplay) on PATH.
+ * choose BlackHole as the microphone. Requires `ffmpeg` on PATH.
+ *
+ * Note: ffmpeg 8+ ffplay rejects `-ac` for raw PCM; this uses `ffmpeg` with AudioToolbox (macOS),
+ * PulseAudio (Linux), or WASAPI (Windows) instead.
  *
  * @see https://platform.openai.com/docs/guides/realtime-websockets
  */
 
 import WebSocket from "ws";
 import { spawn } from "node:child_process";
+import { platform } from "node:os";
 import { config as loadEnv } from "dotenv";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -48,41 +52,57 @@ Environment:
 }
 
 /**
+ * Stream s16le mono PCM on stdin to the default output device (ffmpeg, not ffplay).
  * @param {number} sampleRate
- * @returns {import('node:child_process').ChildProcessWithoutNullStreams}
+ * @returns {import('node:child_process').ChildProcessWithoutNullStreams | null}
  */
-function spawnFfplay(sampleRate) {
-  const child = spawn(
-    "ffplay",
-    [
-      "-nodisp",
-      "-loglevel",
-      "error",
-      "-fflags",
-      "nobuffer",
-      "-flags",
-      "low_delay",
-      "-f",
-      "s16le",
-      "-ar",
-      String(sampleRate),
-      "-ac",
-      "1",
-      "-i",
-      "pipe:0",
-    ],
-    { stdio: ["pipe", "ignore", "pipe"] }
-  );
+function spawnFfmpegFromPcm(sampleRate) {
+  const inputArgs = [
+    "-loglevel",
+    "error",
+    "-fflags",
+    "nobuffer",
+    "-flags",
+    "low_delay",
+    "-f",
+    "s16le",
+    "-ar",
+    String(sampleRate),
+    "-ac",
+    "1",
+    "-i",
+    "pipe:0",
+  ];
+
+  const plat = platform();
+  /** @type {string[] | null} */
+  let outputArgs = null;
+  if (plat === "darwin") {
+    outputArgs = ["-f", "audiotoolbox", "-audio_device_index", "-1", "default"];
+  } else if (plat === "linux") {
+    outputArgs = ["-f", "pulse", "default"];
+  } else if (plat === "win32") {
+    outputArgs = ["-f", "wasapi", "default"];
+  } else {
+    console.error(
+      `realtime-audio-bridge: no audio sink for platform "${plat}". Use macOS, Linux (PulseAudio), or Windows.`
+    );
+    return null;
+  }
+
+  const child = spawn("ffmpeg", [...inputArgs, ...outputArgs], {
+    stdio: ["pipe", "ignore", "pipe"],
+  });
 
   child.stderr?.on("data", (d) => {
     const s = d.toString().trim();
-    if (s) console.error("[ffplay]", s);
+    if (s) console.error("[ffmpeg]", s);
   });
 
   child.on("error", (err) => {
     if (/** @type {NodeJS.ErrnoException} */ (err).code === "ENOENT") {
       console.error(
-        "ffplay not found. Install ffmpeg (e.g. brew install ffmpeg) so ffplay is on your PATH."
+        "ffmpeg not found. Install ffmpeg (e.g. brew install ffmpeg) and ensure `ffmpeg` is on your PATH."
       );
     } else {
       console.error(err);
@@ -141,7 +161,7 @@ async function main() {
   });
 
   let updateSent = false;
-  let player = /** @type {ReturnType<typeof spawnFfplay> | null} */ (null);
+  let player = /** @type {ReturnType<typeof spawnFfmpegFromPcm> | null} */ (null);
   let promptSent = false;
   /** @type {ReturnType<typeof setTimeout> | null} */
   let exitTimer = null;
@@ -159,7 +179,7 @@ async function main() {
           turn_detection: null,
         },
         output: {
-          format: { type: "audio/pcm" },
+          format: { type: "audio/pcm", rate: pcmRate },
           voice,
         },
       },
@@ -212,9 +232,9 @@ async function main() {
     }
 
     if (ev.type === "session.updated" && updateSent && !promptSent) {
-      player = spawnFfplay(pcmRate);
-      if (!player.stdin) {
-        console.error("ffplay stdin unavailable.");
+      player = spawnFfmpegFromPcm(pcmRate);
+      if (!player?.stdin) {
+        console.error("ffmpeg player unavailable (unsupported OS or spawn failed).");
         await shutdown(1);
         return;
       }

@@ -66,8 +66,8 @@ Stop: **Ctrl+C** in the terminal (closes the browser).
 
 To send **model-generated speech** into the meeting, play PCM audio to a **virtual output** (e.g. [BlackHole](https://github.com/ExistentialAudio/BlackHole) 2ch on macOS), then in **Zoom web → Audio settings** choose that device as the **microphone**.
 
-1. Install **ffmpeg** so `ffplay` is on your `PATH` (e.g. `brew install ffmpeg`).
-2. Set system **output** to BlackHole (or a Multi-Output device that includes BlackHole) so `ffplay` audio reaches the virtual cable.
+1. Install **ffmpeg** on your `PATH` (e.g. `brew install ffmpeg`). The bridge runs `ffmpeg` (not `ffplay`) because recent ffmpeg builds reject raw PCM channel options in `ffplay`.
+2. Set system **output** to BlackHole (or a Multi-Output device that includes BlackHole) so that audio reaches the virtual cable.
 3. Join the meeting (this repo’s join script or manually). In Zoom, set **Microphone** to the same BlackHole device.
 4. Run the bridge (requires `OPENAI_API_KEY` in `.env`):
 
@@ -100,5 +100,5 @@ The script attempts to run without manual steps:
 | Path | Purpose |
 |------|---------|
 | `src/join-zoom.mjs` | Playwright script |
-| `src/realtime-audio-bridge.mjs` | OpenAI Realtime WebSocket → `ffplay` (route into Zoom via virtual audio) |
+| `src/realtime-audio-bridge.mjs` | OpenAI Realtime WebSocket → `ffmpeg` → system audio (route into Zoom via virtual audio) |
 | `.env.example` | Sample environment variables |
