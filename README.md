@@ -40,6 +40,16 @@ Edit `.env`:
 npm run join
 ```
 
+**Real microphone** (others hear you in the meeting):
+
+```bash
+npm run join:real
+# or: USE_REAL_MEDIA=1 npm run join
+# or: node src/join-zoom.mjs --real-audio
+```
+
+Stay **headed** (default). Accept mic/camera prompts in the browser if macOS asks. The script best-effort clicks “join computer audio” and **Unmute**; if Zoom’s UI changed, do those steps manually.
+
 Or pass flags (overrides env):
 
 ```bash
@@ -47,15 +57,34 @@ node src/join-zoom.mjs --url "https://zoom.us/j/1234567890?pwd=..." --name "POC 
 ```
 
 - `--headless` — use only if you know your environment supports it (e.g. Xvfb on Linux servers).
+- `--real-audio` / `USE_REAL_MEDIA` — real mic/camera instead of fake silent devices.
 - `--timeout <ms>` — max time for join steps (default 120000).
 
 Stop: **Ctrl+C** in the terminal (closes the browser).
+
+## OpenAI Realtime → Zoom (virtual mic)
+
+To send **model-generated speech** into the meeting, play PCM audio to a **virtual output** (e.g. [BlackHole](https://github.com/ExistentialAudio/BlackHole) 2ch on macOS), then in **Zoom web → Audio settings** choose that device as the **microphone**.
+
+1. Install **ffmpeg** so `ffplay` is on your `PATH` (e.g. `brew install ffmpeg`).
+2. Set system **output** to BlackHole (or a Multi-Output device that includes BlackHole) so `ffplay` audio reaches the virtual cable.
+3. Join the meeting (this repo’s join script or manually). In Zoom, set **Microphone** to the same BlackHole device.
+4. Run the bridge (requires `OPENAI_API_KEY` in `.env`):
+
+```bash
+npm run realtime:bridge -- --text "Say a short greeting to the meeting."
+```
+
+Optional env vars: `OPENAI_REALTIME_MODEL`, `OPENAI_REALTIME_VOICE`, `REALTIME_PROMPT`, `REALTIME_PCM_RATE`, `REALTIME_INSTRUCTIONS` — see `.env.example`.
+
+This is a **local R&D** path only; align with Zoom’s terms and supported APIs before shipping anything customer-facing.
 
 ## Automation (pre-join)
 
 The script attempts to run without manual steps:
 
-- **Mic/camera**: Chromium is launched with fake media flags (`--use-fake-ui-for-media-stream`, `--use-fake-device-for-media-stream`) so permission prompts are not shown, and the context grants `camera` / `microphone` for Zoom origins after navigation.
+- **Mic/camera (default)**: Chromium uses **fake** media flags so permission prompts are suppressed; the context still grants `camera` / `microphone` for Zoom origins after navigation. No real audio is sent.
+- **Mic/camera (`--real-audio` / `USE_REAL_MEDIA`)**: Fake-device flags are **off**; use a **headed** browser and allow the real microphone when prompted. After join, the script best-effort clicks join-computer-audio and **Unmute** (`SELECTORS.joinComputerAudio` / `unmuteMic` in `src/join-zoom.mjs`).
 - **Name / Join**: The guest name from `GUEST_NAME` is filled and **Join** is clicked using locators across **all frames** (Zoom often loads the pre-join UI in an iframe). If Zoom changes the DOM, update `SELECTORS` in `src/join-zoom.mjs`.
 
 ## Limitations (POC)
@@ -71,4 +100,5 @@ The script attempts to run without manual steps:
 | Path | Purpose |
 |------|---------|
 | `src/join-zoom.mjs` | Playwright script |
+| `src/realtime-audio-bridge.mjs` | OpenAI Realtime WebSocket → `ffplay` (route into Zoom via virtual audio) |
 | `.env.example` | Sample environment variables |

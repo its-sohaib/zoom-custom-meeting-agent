@@ -16,12 +16,23 @@ loadEnv({ path: path.join(ROOT, ".env") });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Chromium flags so media permission prompts are not shown (fake devices). */
-const CHROMIUM_MEDIA_ARGS = [
+const AUTOPLAY_ARG = "--autoplay-policy=no-user-gesture-required";
+
+/** Fake media: silent stream, no permission UI (default POC). */
+const CHROMIUM_FAKE_MEDIA_ARGS = [
   "--use-fake-ui-for-media-stream",
   "--use-fake-device-for-media-stream",
-  "--autoplay-policy=no-user-gesture-required",
+  AUTOPLAY_ARG,
 ];
+
+/**
+ * @param {boolean} realAudio
+ * @returns {string[]}
+ */
+function chromiumLaunchArgs(realAudio) {
+  if (realAudio) return [AUTOPLAY_ARG];
+  return [...CHROMIUM_FAKE_MEDIA_ARGS];
+}
 
 /**
  * @param {import('playwright').Page} page
@@ -71,15 +82,36 @@ const SELECTORS = {
     '[data-tooltip*="Leave" i]',
     'footer button >> nth=0',
   ],
+  /** Best-effort only; Zoom DOM varies. */
+  joinComputerAudio: [
+    'button:has-text("Join with computer audio")',
+    'button:has-text("Join Audio")',
+    '[role="button"]:has-text("Join with computer audio")',
+    '[aria-label*="Join with computer audio" i]',
+    '[aria-label*="computer audio" i]',
+  ],
+  unmuteMic: [
+    'button[aria-label*="unmute" i]',
+    'button[aria-label*="Unmute" i]',
+    '[data-tooltip*="Unmute" i]',
+    'button:has-text("Unmute")',
+  ],
 };
 
 function parseArgs(argv) {
-  const out = { url: null, name: null, headless: false, timeoutMs: 120_000 };
+  const out = {
+    url: null,
+    name: null,
+    headless: false,
+    realAudio: false,
+    timeoutMs: 120_000,
+  };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--url" && argv[i + 1]) out.url = argv[++i];
     else if (a === "--name" && argv[i + 1]) out.name = argv[++i];
     else if (a === "--headless") out.headless = true;
+    else if (a === "--real-audio") out.realAudio = true;
     else if (a === "--timeout" && argv[i + 1]) out.timeoutMs = Number(argv[++i]) || out.timeoutMs;
     else if (a === "--help" || a === "-h") {
       console.log(`
@@ -87,14 +119,17 @@ Usage: node src/join-zoom.mjs [options]
 
   --url <url>       Zoom meeting URL (or set ZOOM_MEETING_URL)
   --name <string>   Guest display name (or set GUEST_NAME)
+  --real-audio        Use real mic/camera (no fake devices). Also set USE_REAL_MEDIA=1
   --headless          Run headless (often fails with Zoom; for CI/Xvfb only)
   --timeout <ms>      Max time for join steps (default 120000)
 
-Environment: ZOOM_MEETING_URL, GUEST_NAME
+Environment: ZOOM_MEETING_URL, GUEST_NAME, USE_REAL_MEDIA (1/true=yes), ZOOM_PASSCODE
 `);
       process.exit(0);
     }
   }
+  const envReal = process.env.USE_REAL_MEDIA?.trim().toLowerCase();
+  if (envReal === "1" || envReal === "true" || envReal === "yes") out.realAudio = true;
   return out;
 }
 
@@ -266,6 +301,22 @@ async function runPreJoinFlow(page, guestName, passcode, timeoutMs) {
   return false;
 }
 
+/**
+ * Non-blocking: tries to join computer audio and unmute. Logs if nothing matched.
+ * @param {import('playwright').Page} page
+ */
+async function tryJoinComputerAudioAndUnmute(page) {
+  const audioOk = await clickFirstVisible(page, SELECTORS.joinComputerAudio, 12_000);
+  if (audioOk) console.log("Clicked join computer audio (best-effort).");
+  else console.warn("Could not auto-click join computer audio; use the Zoom UI if needed.");
+
+  await sleep(800);
+
+  const unmuteOk = await clickFirstVisible(page, SELECTORS.unmuteMic, 8_000);
+  if (unmuteOk) console.log("Clicked unmute (best-effort).");
+  else console.warn("Could not auto-click unmute; unmute in the Zoom toolbar if needed.");
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   const meetingUrl = args.url || process.env.ZOOM_MEETING_URL;
@@ -280,10 +331,21 @@ async function main() {
     process.exit(1);
   }
 
-  console.log("Starting Chromium (headed=%s)…", !args.headless);
+  if (args.realAudio && args.headless) {
+    console.warn(
+      "Real audio with --headless is unreliable; prefer headed mode so the OS can expose your microphone."
+    );
+  }
+  if (args.realAudio) {
+    console.log(
+      "Real media enabled: grant mic (and camera if asked) in the browser, join computer audio, and unmute so others hear you."
+    );
+  }
+
+  console.log("Starting Chromium (headed=%s, realAudio=%s)…", !args.headless, args.realAudio);
   const browser = await chromium.launch({
     headless: args.headless,
-    args: CHROMIUM_MEDIA_ARGS,
+    args: chromiumLaunchArgs(args.realAudio),
   });
 
   const context = await browser.newContext({
@@ -320,7 +382,11 @@ async function main() {
     await clickFirstVisible(page, SELECTORS.dismissOpenApp, 8_000);
 
     const pass = process.env.ZOOM_PASSCODE?.trim() || undefined;
-    console.log("Completing pre-join (name, permissions handled by browser flags)…");
+    console.log(
+      args.realAudio
+        ? "Completing pre-join (accept mic/camera prompts in the window if shown)…"
+        : "Completing pre-join (fake media: no real mic/camera)…"
+    );
     const preJoined = await runPreJoinFlow(page, guestName, pass, args.timeoutMs);
     if (preJoined) console.log("Clicked Join.");
     else console.warn("Pre-join automation did not confirm Join; check the window or selectors.");
@@ -328,6 +394,7 @@ async function main() {
     const joined = await waitForAny(page, SELECTORS.inMeeting, args.timeoutMs);
     if (joined) {
       console.log("Detected in-meeting UI. Leave the meeting in the browser or press Ctrl+C to exit.");
+      await tryJoinComputerAudioAndUnmute(page);
     } else {
       console.warn(
         "Could not confirm in-meeting state (waiting room, SSO, captcha, or DOM change). Check the browser window."
